@@ -1,3 +1,6 @@
+package example.sangria.subsription
+
+
 import akka.actor.{ActorSystem, Props}
 import akka.event.Logging
 import akka.http.scaladsl.Http
@@ -6,11 +9,11 @@ import akka.http.scaladsl.marshalling.ToResponseMarshallable
 import akka.http.scaladsl.model.StatusCodes._
 import akka.http.scaladsl.server.Directives._
 import akka.http.scaladsl.server._
-import akka.stream.ActorMaterializer
-import akka.stream.actor.{ActorPublisher, ActorSubscriber}
-import akka.stream.scaladsl.{Sink, Source}
+import akka.stream.{ActorMaterializer, OverflowStrategy}
+import akka.stream.scaladsl.{Keep, Sink, Source, SourceQueueWithComplete}
 import akka.util.Timeout
-import generic.{Event, MemoryEventStore}
+import example.sangria.subsription.generic.{AuthorView, MemoryAuthorStore}
+import org.reactivestreams.Publisher
 import sangria.ast.OperationType
 import sangria.execution.{ErrorWithResolver, Executor, QueryAnalysisError}
 import sangria.marshalling.sprayJson._
@@ -22,79 +25,77 @@ import scala.language.postfixOps
 import scala.util.{Failure, Success}
 
 object Server extends App with SubscriptionSupport {
-  implicit val system = ActorSystem("server")
-  implicit val materializer = ActorMaterializer()
+  implicit val system: ActorSystem = ActorSystem("server")
+  implicit val materializer: ActorMaterializer = ActorMaterializer()
   val logger = Logging(system, getClass)
 
   import system.dispatcher
 
-  implicit val timeout = Timeout(10 seconds)
-
-  val articlesView = system.actorOf(Props[ArticleView])
-  val articlesSink = Sink.fromSubscriber(ActorSubscriber[ArticleEvent](articlesView))
+  implicit val timeout: Timeout = Timeout(10 seconds)
 
   val authorsView = system.actorOf(Props[AuthorView])
-  val authorsSink = Sink.fromSubscriber(ActorSubscriber[AuthorEvent](authorsView))
+  val authorsSink = Sink.actorRef(authorsView, ())
 
-  val eventStore = system.actorOf(Props[MemoryEventStore])
-  val eventStorePublisher =
-    Source.fromPublisher(ActorPublisher[Event](eventStore))
-      .runWith(Sink.asPublisher(fanout = true))
+  val (queue, eventStorePublisher): (SourceQueueWithComplete[AuthorEvent], Publisher[AuthorEvent]) =
+    Source.queue[AuthorEvent](10000, OverflowStrategy.backpressure)
+      .toMat(Sink.asPublisher[AuthorEvent](fanout = true))(Keep.both)
+      .run()
+
+  val eventStore = system.actorOf(Props(new MemoryAuthorStore(queue)))
 
   val subscriptionEventPublisher = system actorOf Props(new SubscriptionEventPublisher(eventStorePublisher))
 
   // Connect event store to views
-  Source.fromPublisher(eventStorePublisher).collect { case event: ArticleEvent ⇒ event }.to(articlesSink).run()
-  Source.fromPublisher(eventStorePublisher).collect { case event: AuthorEvent ⇒ event }.to(authorsSink).run()
+  Source.fromPublisher(eventStorePublisher).collect { case event: AuthorEvent => event }.to(authorsSink).run()
 
-  val ctx = Ctx(authorsView, articlesView, eventStore, system.dispatcher, timeout)
+  val ctx = Ctx(authorsView, eventStore, system.dispatcher, timeout)
 
   val executor = Executor(schema.createSchema)
 
   def executeQuery(query: String, operation: Option[String], variables: JsObject = JsObject.empty) =
     QueryParser.parse(query) match {
-      case Success(queryAst) ⇒
+      case Success(queryAst) =>
         queryAst.operationType(operation) match {
 
-          case Some(OperationType.Subscription) ⇒
-            complete(ToResponseMarshallable(BadRequest → JsString("Subscriptions not supported via HTTP. Use WebSockets")))
+          case Some(OperationType.Subscription) =>
+            complete(ToResponseMarshallable(BadRequest -> JsString("Subscriptions not supported via HTTP. Use WebSockets")))
 
           // all other queries will just return normal JSON response
-          case _ ⇒
+          case _ =>
             complete(executor.execute(queryAst, ctx, (), operation, variables)
-              .map(OK → _)
+              .map(OK -> _)
               .recover {
-                case error: QueryAnalysisError ⇒ BadRequest → error.resolveError
-                case error: ErrorWithResolver ⇒ InternalServerError → error.resolveError
+                case error: QueryAnalysisError => BadRequest -> error.resolveError
+                case error: ErrorWithResolver => InternalServerError -> error.resolveError
               })
         }
 
-      case Failure(error: SyntaxError) ⇒
-        complete(ToResponseMarshallable(BadRequest → JsObject(
-          "syntaxError" → JsString(error.getMessage),
-          "locations" → JsArray(JsObject(
-            "line" → JsNumber(error.originalError.position.line),
-            "column" → JsNumber(error.originalError.position.column))))))
+      case Failure(error: SyntaxError) =>
+        complete(ToResponseMarshallable(BadRequest -> JsObject(
+          "syntaxError" -> JsString(error.getMessage),
+          "locations" -> JsArray(JsObject(
+            "line" -> JsNumber(error.originalError.position.line),
+            "column" -> JsNumber(error.originalError.position.column))))))
 
-      case Failure(error) ⇒
+      case Failure(error) =>
         complete(ToResponseMarshallable(InternalServerError -> JsString(error.getMessage)))
     }
 
   val route: Route =
     path("graphql") {
       post {
-        entity(as[JsValue]) { requestJson ⇒
+        entity(as[JsValue]) { requestJson =>
           val JsObject(fields) = requestJson
 
           val JsString(query) = fields("query")
 
           val operation = fields.get("operationName") collect {
-            case JsString(op) ⇒ op
+            case JsString(op) => op
           }
 
           val vars = fields.get("variables") match {
-            case Some(obj: JsObject) ⇒ obj
-            case _ ⇒ JsObject.empty
+            case Some(obj: JsObject) => obj
+            case _ => JsObject.empty
           }
 
           executeQuery(query, operation, vars)

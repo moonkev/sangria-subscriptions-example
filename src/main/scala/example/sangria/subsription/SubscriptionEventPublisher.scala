@@ -1,17 +1,18 @@
+package example.sangria.subsription
+
 import akka.actor.{Actor, ActorLogging, ActorRef, Terminated}
 import akka.stream.scaladsl.{Sink, Source}
 import akka.stream.{ActorMaterializer, OverflowStrategy}
-import generic.Event
 import org.reactivestreams.Publisher
 
 object SubscriptionEventPublisher {
   case object Join
 }
-class SubscriptionEventPublisher(publisher: Publisher[Event]) extends Actor with ActorLogging {
+class SubscriptionEventPublisher(publisher: Publisher[AuthorEvent]) extends Actor with ActorLogging {
 
   import SubscriptionEventPublisher._
 
-  implicit val materializer = ActorMaterializer()
+  implicit val materializer: ActorMaterializer = ActorMaterializer()
 
   var subscribers: Set[ActorRef] = Set.empty
 

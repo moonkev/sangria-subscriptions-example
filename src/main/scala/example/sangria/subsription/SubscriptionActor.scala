@@ -1,12 +1,14 @@
+package example.sangria.subsription
+
 import akka.actor.{Actor, ActorLogging, ActorRef}
 import akka.util.Timeout
-import generic.Event
 import sangria.ast.OperationType
 import sangria.execution.{Executor, PreparedQuery}
 import sangria.marshalling.sprayJson._
 import sangria.parser.QueryParser
 import spray.json._
 
+import scala.concurrent.ExecutionContextExecutor
 import scala.util.{Failure, Success}
 
 object SubscriptionActor extends DefaultJsonProtocol {
@@ -17,14 +19,14 @@ object SubscriptionActor extends DefaultJsonProtocol {
   case class Connected(outgoing: ActorRef)
   case class PreparedQueryContext(query: PreparedQuery[Ctx, Any, JsObject])
 
-  implicit val subscribeProtocol = jsonFormat2(Subscribe)
+  implicit val subscribeProtocol: RootJsonFormat[Subscribe] = jsonFormat2(Subscribe)
 }
 
 class SubscriptionActor(publisher: ActorRef, ctx: Ctx)(implicit timeout: Timeout) extends Actor with ActorLogging {
 
   import SubscriptionActor._
 
-  implicit val ec = context.system.dispatcher
+  implicit val ec: ExecutionContextExecutor = context.system.dispatcher
 
   val executor = Executor(schema.createSchema)
   var subscriptions = Map.empty[String, Set[PreparedQueryContext]]
@@ -50,7 +52,7 @@ class SubscriptionActor(publisher: ActorRef, ctx: Ctx)(implicit timeout: Timeout
         })
       }
 
-    case event: Event =>
+    case event: AuthorEvent =>
       val fieldName = schema.subscriptionFieldName(event)
       queryContextsFor(fieldName) foreach { ctx =>
         ctx.query.execute(root = event) map { result =>
@@ -59,12 +61,12 @@ class SubscriptionActor(publisher: ActorRef, ctx: Ctx)(implicit timeout: Timeout
       }
   }
 
-  def queryContextsFor(fieldName: Option[String]) = fieldName match {
+  def queryContextsFor(fieldName: Option[String]): Set[PreparedQueryContext] = fieldName match {
     case Some(name) => subscriptions.getOrElse(name, Set.empty[PreparedQueryContext])
     case _ => Set.empty[PreparedQueryContext]
   }
 
-  def prepareQuery(subscription: Subscribe) = {
+  def prepareQuery(subscription: Subscribe): Unit = {
     QueryParser.parse(subscription.query) match {
       case Success(ast) =>
         ast.operationType(subscription.operation) match {
@@ -80,5 +82,4 @@ class SubscriptionActor(publisher: ActorRef, ctx: Ctx)(implicit timeout: Timeout
         log.warning(e.getMessage)
     }
   }
-
 }

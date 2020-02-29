@@ -3,6 +3,7 @@ package example.sangria.subsription
 import akka.actor.{Actor, ActorLogging, ActorRef, Terminated}
 import akka.stream.scaladsl.{Sink, Source}
 import akka.stream.{ActorMaterializer, OverflowStrategy}
+import example.sangria.subsription.AuthorActor.AuthorEvent
 import org.reactivestreams.Publisher
 
 object SubscriptionEventPublisher {

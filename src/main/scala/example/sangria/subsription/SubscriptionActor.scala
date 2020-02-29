@@ -2,6 +2,7 @@ package example.sangria.subsription
 
 import akka.actor.{Actor, ActorLogging, ActorRef}
 import akka.util.Timeout
+import example.sangria.subsription.AuthorActor.AuthorEvent
 import sangria.ast.OperationType
 import sangria.execution.{Executor, PreparedQuery}
 import sangria.marshalling.sprayJson._
@@ -17,19 +18,19 @@ object SubscriptionActor extends DefaultJsonProtocol {
   case class SubscriptionAccepted() extends SubscriptionMessage
   case class QueryResult(json: JsValue) extends SubscriptionMessage
   case class Connected(outgoing: ActorRef)
-  case class PreparedQueryContext(query: PreparedQuery[Ctx, Any, JsObject])
+  case class PreparedQueryContext(query: PreparedQuery[Any, Any, JsObject])
 
   implicit val subscribeProtocol: RootJsonFormat[Subscribe] = jsonFormat2(Subscribe)
 }
 
-class SubscriptionActor(publisher: ActorRef, ctx: Ctx)(implicit timeout: Timeout) extends Actor with ActorLogging {
+class SubscriptionActor(publisher: ActorRef)(implicit timeout: Timeout) extends Actor with ActorLogging {
 
   import SubscriptionActor._
 
   implicit val ec: ExecutionContextExecutor = context.system.dispatcher
 
-  val executor = Executor(schema.createSchema)
-  var subscriptions = Map.empty[String, Set[PreparedQueryContext]]
+  val executor: Executor[Any, Any] = Executor(schema.createSchema)
+  var subscriptions: Map[String, Set[PreparedQueryContext]] = Map.empty
 
   override def receive: Receive = {
     case Connected(outgoing) =>
@@ -71,7 +72,7 @@ class SubscriptionActor(publisher: ActorRef, ctx: Ctx)(implicit timeout: Timeout
       case Success(ast) =>
         ast.operationType(subscription.operation) match {
           case Some(OperationType.Subscription) =>
-            executor.prepare(ast, ctx, (), subscription.operation, JsObject.empty).map {
+            executor.prepare(ast, (), (), subscription.operation, JsObject.empty).map {
               query => self ! PreparedQueryContext(query)
             }
           case x =>

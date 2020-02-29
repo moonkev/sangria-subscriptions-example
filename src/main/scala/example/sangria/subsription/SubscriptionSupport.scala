@@ -15,11 +15,11 @@ trait SubscriptionSupport {
 
   import SubscriptionActor._
 
-  def graphQlSubscriptionSocket(publisher: ActorRef, ctx: Ctx)(
+  def graphQlSubscriptionSocket(publisher: ActorRef)(
     implicit system: ActorSystem, materializer: ActorMaterializer, timeout: Timeout
   ): Flow[Message, TextMessage.Strict, NotUsed] = {
 
-    val subscriptionActor = system.actorOf(Props(new SubscriptionActor(publisher, ctx)))
+    val subscriptionActor = system.actorOf(Props(new SubscriptionActor(publisher)))
 
     // Transform any incoming messages into Subscribe messages and let the subscription actor know about it
     val incoming: Sink[Message, NotUsed] =

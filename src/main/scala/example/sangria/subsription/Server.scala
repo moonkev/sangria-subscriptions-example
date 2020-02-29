@@ -9,10 +9,10 @@ import akka.http.scaladsl.marshalling.ToResponseMarshallable
 import akka.http.scaladsl.model.StatusCodes._
 import akka.http.scaladsl.server.Directives._
 import akka.http.scaladsl.server._
-import akka.stream.{ActorMaterializer, OverflowStrategy}
 import akka.stream.scaladsl.{Keep, Sink, Source, SourceQueueWithComplete}
+import akka.stream.{ActorMaterializer, OverflowStrategy}
 import akka.util.Timeout
-import example.sangria.subsription.generic.{AuthorView, MemoryAuthorStore}
+import example.sangria.subsription.AuthorActor.{AuthorCreated, AuthorEvent}
 import org.reactivestreams.Publisher
 import sangria.ast.OperationType
 import sangria.execution.{ErrorWithResolver, Executor, QueryAnalysisError}
@@ -33,22 +33,16 @@ object Server extends App with SubscriptionSupport {
 
   implicit val timeout: Timeout = Timeout(10 seconds)
 
-  val authorsView = system.actorOf(Props[AuthorView])
-  val authorsSink = Sink.actorRef(authorsView, ())
-
   val (queue, eventStorePublisher): (SourceQueueWithComplete[AuthorEvent], Publisher[AuthorEvent]) =
     Source.queue[AuthorEvent](10000, OverflowStrategy.backpressure)
       .toMat(Sink.asPublisher[AuthorEvent](fanout = true))(Keep.both)
       .run()
 
-  val eventStore = system.actorOf(Props(new MemoryAuthorStore(queue)))
+  Source.tick(0.second, 5.seconds, AuthorCreated("Kev", "Digital")).runForeach(queue.offer)
 
-  val subscriptionEventPublisher = system actorOf Props(new SubscriptionEventPublisher(eventStorePublisher))
+  val eventStore = system.actorOf(Props(new AuthorActor(queue)))
 
-  // Connect event store to views
-  Source.fromPublisher(eventStorePublisher).collect { case event: AuthorEvent => event }.to(authorsSink).run()
-
-  val ctx = Ctx(authorsView, eventStore, system.dispatcher, timeout)
+  val subscriptionEventPublisher = system.actorOf(Props(new SubscriptionEventPublisher(eventStorePublisher)))
 
   val executor = Executor(schema.createSchema)
 
@@ -62,7 +56,7 @@ object Server extends App with SubscriptionSupport {
 
           // all other queries will just return normal JSON response
           case _ =>
-            complete(executor.execute(queryAst, ctx, (), operation, variables)
+            complete(executor.execute(queryAst, (), (), operation, variables)
               .map(OK -> _)
               .recover {
                 case error: QueryAnalysisError => BadRequest -> error.resolveError
@@ -101,7 +95,7 @@ object Server extends App with SubscriptionSupport {
           executeQuery(query, operation, vars)
         }
       } ~
-        get(handleWebSocketMessages(graphQlSubscriptionSocket(subscriptionEventPublisher, ctx)))
+        get(handleWebSocketMessages(graphQlSubscriptionSocket(subscriptionEventPublisher)))
     } ~
       (get & path("client")) {
         getFromResource("web/client.html")

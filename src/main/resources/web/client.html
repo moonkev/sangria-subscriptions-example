@@ -176,12 +176,11 @@
                     <label for="Query" class="control-label">GraphQL subscription query</label>
                     <textarea id="query" class="form-control" rows="10"
                               placeholder="GraphQL subscription query goes here" spellcheck="false">
-subscription NewAuthors {
-  authorCreated {
-    id
-    version
-    firstName
-    lastName
+subscription PriceUpdates {
+  priceUpdate(tickers: ["AAPL", "IBM", "MSFT"]) {
+    ticker
+    bidPrice
+    offerPrice
   }
 }</textarea>
 

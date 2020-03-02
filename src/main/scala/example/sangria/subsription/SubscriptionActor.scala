@@ -2,11 +2,12 @@ package example.sangria.subsription
 
 import akka.actor.{Actor, ActorLogging, ActorRef}
 import akka.util.Timeout
-import example.sangria.subsription.AuthorActor.AuthorEvent
+import example.sangria.subsription.Protocol.Event
 import sangria.ast.OperationType
 import sangria.execution.{Executor, PreparedQuery}
 import sangria.marshalling.sprayJson._
 import sangria.parser.QueryParser
+import sangria.schema.Args
 import spray.json._
 
 import scala.concurrent.ExecutionContextExecutor
@@ -23,14 +24,16 @@ object SubscriptionActor extends DefaultJsonProtocol {
   implicit val subscribeProtocol: RootJsonFormat[Subscribe] = jsonFormat2(Subscribe)
 }
 
-class SubscriptionActor(publisher: ActorRef)(implicit timeout: Timeout) extends Actor with ActorLogging {
+class SubscriptionActor(publisher: ActorRef, schemaContainer: SubscriptionSchemaContainer)(implicit timeout: Timeout)
+    extends Actor
+    with ActorLogging {
 
   import SubscriptionActor._
 
   implicit val ec: ExecutionContextExecutor = context.system.dispatcher
 
-  val executor: Executor[Any, Any] = Executor(schema.createSchema)
-  var subscriptions: Map[String, Set[PreparedQueryContext]] = Map.empty
+  val executor: Executor[Any, Any] = Executor(schemaContainer.schema)
+  var subscriptions: Map[String, Set[(PreparedQueryContext, Args)]] = Map.empty
 
   override def receive: Receive = {
     case Connected(outgoing) =>
@@ -46,25 +49,23 @@ class SubscriptionActor(publisher: ActorRef)(implicit timeout: Timeout) extends 
     case context: PreparedQueryContext =>
       log.info(s"Query is prepared: $context")
       outgoing ! SubscriptionAccepted()
-      context.query.fields.map(_.field.name).foreach { field =>
-        subscriptions = subscriptions.updated(field, subscriptions.get(field) match {
-          case Some(contexts) => contexts + context
-          case _ => Set(context)
+      context.query.fields.foreach { field =>
+        subscriptions = subscriptions.updated(field.field.name, subscriptions.get(field.field.name) match {
+          case Some(contexts) => contexts + (context -> field.args)
+          case _              => Set(context -> field.args)
         })
       }
 
-    case event: AuthorEvent =>
-      val fieldName = schema.subscriptionFieldName(event)
-      queryContextsFor(fieldName) foreach { ctx =>
-        ctx.query.execute(root = event) map { result =>
+    case event: Event =>
+      for {
+        fieldName <- schemaContainer.subscriptionFieldName(event)
+        contextSet <- subscriptions.get(fieldName)
+        (ctx, args) <- contextSet if schemaContainer.filter(event, args)
+      } {
+        ctx.query.execute(root = event).map { result =>
           outgoing ! QueryResult(result)
         }
       }
-  }
-
-  def queryContextsFor(fieldName: Option[String]): Set[PreparedQueryContext] = fieldName match {
-    case Some(name) => subscriptions.getOrElse(name, Set.empty[PreparedQueryContext])
-    case _ => Set.empty[PreparedQueryContext]
   }
 
   def prepareQuery(subscription: Subscribe): Unit = {
@@ -72,8 +73,8 @@ class SubscriptionActor(publisher: ActorRef)(implicit timeout: Timeout) extends 
       case Success(ast) =>
         ast.operationType(subscription.operation) match {
           case Some(OperationType.Subscription) =>
-            executor.prepare(ast, (), (), subscription.operation, JsObject.empty).map {
-              query => self ! PreparedQueryContext(query)
+            executor.prepare(ast, (), (), subscription.operation, JsObject.empty).map { query =>
+              self ! PreparedQueryContext(query)
             }
           case x =>
             log.warning(s"OperationType: $x not supported with WebSockets. Use HTTP POST")
